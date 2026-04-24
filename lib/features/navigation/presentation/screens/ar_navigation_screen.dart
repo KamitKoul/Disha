@@ -1,15 +1,12 @@
 import 'dart:async';
-import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:vector_math/vector_math_64.dart' hide Colors;
 import '../bloc/navigation_bloc.dart';
 import '../widgets/ar_view_widget.dart';
 import '../widgets/minimap_widget.dart';
 import '../widgets/trip_stats_row.dart';
-import '../../../core/services/ar_service.dart';
-import '../../../core/services/tts_service.dart';
-import 'destination_search_screen.dart';
+import '../../../../core/services/ar_service.dart';
+import '../../../../core/services/tts_service.dart';
 import 'dart:math' as math;
 
 class ArNavigationScreen extends StatefulWidget {
@@ -197,9 +194,9 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
             if (state.status == NavigationStatus.navigating) ...[
               const Divider(color: Colors.white24, height: 20),
               TripStatsRow(
-                distance: state.currentDistance ?? 0,
-                duration: state.estimatedTimeRemaining,
+                eta: state.estimatedTimeRemaining,
                 steps: state.stepsCount,
+                h3Cell: state.currentH3Cell,
               ),
             ]
           ],

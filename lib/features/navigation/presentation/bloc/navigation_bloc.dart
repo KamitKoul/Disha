@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:math' as math_dart;
 import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:equatable/equatable.dart';
 import 'package:vector_math/vector_math_64.dart';
@@ -10,7 +9,6 @@ import '../../domain/a_star_router.dart';
 import '../../../../core/utils/gps_converter.dart';
 import '../../../../core/services/map_service.dart';
 import '../../../../core/utils/spatial_hash.dart';
-import '../../../../core/utils/path_simplifier.dart';
 
 part 'navigation_event.dart';
 part 'navigation_state.dart';
