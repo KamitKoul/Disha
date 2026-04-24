@@ -62,6 +62,12 @@ class FindNearestByCategory extends NavigationEvent {
   List<Object?> get props => [category];
 }
 
+class AddWaypoint extends NavigationEvent {
+  const AddWaypoint();
+  @override
+  List<Object?> get props => [];
+}
+
 class LogLocation extends NavigationEvent {
   final String label;
   final String category;
