@@ -32,7 +32,6 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
     super.initState();
     TtsService().init();
     
-    // Check if already calibrated (e.g., if navigating back or state persisted)
     final initialState = context.read<NavigationBloc>().state;
     if (initialState.currentNodeId != null) {
       _isCalibrated = true;
@@ -70,10 +69,8 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // FIXED AR LAYER
           if (_showAr) const ArViewWidget(),
           
-          // UI OVERLAY LAYER
           BlocConsumer<NavigationBloc, NavigationState>(
             listenWhen: (prev, curr) => 
                 prev.status != curr.status || 
@@ -105,12 +102,12 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
                 prev.mappingPath.length != curr.mappingPath.length ||
                 prev.stepsCount != curr.stepsCount ||
                 prev.currentWaypointIndex != curr.currentWaypointIndex ||
-                prev.currentNodeId != curr.currentNodeId,
+                prev.currentNodeId != curr.currentNodeId ||
+                prev.currentHeading != curr.currentHeading, // Rebuild arrow on compass change
             builder: (context, state) {
               return Stack(
                 fit: StackFit.expand,
                 children: [
-                  // Show calibration overlay only if NOT calibrated AND not in mapping/navigating state
                   if (!_isCalibrated && state.currentNodeId == null) 
                     _buildCalibrationOverlay(context, theme),
 
@@ -202,6 +199,17 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
       );
     }
 
+    if (state.status == NavigationStatus.navigating) {
+      return FloatingActionButton.extended(
+        heroTag: 'next_btn',
+        onPressed: () => context.read<NavigationBloc>().add(const ManualNextWaypoint()),
+        backgroundColor: Colors.greenAccent,
+        foregroundColor: Colors.black,
+        icon: const Icon(Icons.arrow_forward_ios_rounded),
+        label: const Text('NEXT STEP', style: TextStyle(fontWeight: FontWeight.bold)),
+      );
+    }
+
     return FloatingActionButton.extended(
       heroTag: 'log_btn',
       onPressed: () => _startMappingFlow(context),
@@ -213,44 +221,50 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
   }
 
   Widget _buildDirectionalArrow(NavigationState state, ThemeData theme) {
-    return BlocBuilder<NavigationBloc, NavigationState>(
-      buildWhen: (prev, curr) => prev.currentPosition != curr.currentPosition || prev.currentWaypointIndex != curr.currentWaypointIndex,
-      builder: (context, state) {
-        return Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const SizedBox(height: 120),
-              Transform.rotate(
-                angle: _calculateArrowAngle(state),
-                child: Icon(Icons.navigation_rounded, size: 100, color: theme.colorScheme.primary.withValues(alpha: 0.8)),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                decoration: BoxDecoration(color: Colors.black45, borderRadius: BorderRadius.circular(8)),
-                child: const Text('FOLLOW ARROW', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 12, letterSpacing: 1)),
-              ),
-            ],
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(height: 120),
+          Transform.rotate(
+            angle: _calculateArrowAngle(state),
+            child: Icon(Icons.navigation_rounded, size: 100, color: theme.colorScheme.primary.withValues(alpha: 0.9)),
           ),
-        );
-      },
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            decoration: BoxDecoration(color: Colors.black45, borderRadius: BorderRadius.circular(8)),
+            child: const Text('FOLLOW ARROW', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 12, letterSpacing: 1)),
+          ),
+        ],
+      ),
     );
   }
 
   double _calculateArrowAngle(NavigationState state) {
-    if (state.route.isEmpty || state.currentPosition == null || state.currentWaypointIndex >= state.route.length) return 0.0;
+    if (state.route.isEmpty || state.currentWaypointIndex >= state.route.length) return 0.0;
+    
+    // COMPASS-BASED ARROW (Immune to AR Tracking Glitches)
     final target = state.route[state.currentWaypointIndex];
-    final current = state.currentPosition!;
+    final current = state.route[math.max(0, state.currentWaypointIndex - 1)]; 
+    
     double dx = target.x - current.x;
-    double dz = target.z - current.z;
-    return math.atan2(dx, -dz);
+    double dz = target.z - current.z; // AR Forward is -Z
+    
+    // Absolute bearing to target
+    double bearingToTarget = math.atan2(dx, -dz);
+    
+    // Phone's current magnetic heading
+    double phoneHeadingRad = state.currentHeading * (math.pi / 180.0);
+    
+    // The arrow points towards the target, relative to where the phone is looking
+    return bearingToTarget - phoneHeadingRad;
   }
 
   Widget _buildNavigationCard(BuildContext context, NavigationState state, ThemeData theme) {
     return Card(
       elevation: 12,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-      color: const Color(0xFF1E293B).withValues(alpha: 0.9),
+      color: const Color(0xFF1E293B).withValues(alpha: 0.95),
       child: Padding(
         padding: const EdgeInsets.all(20.0),
         child: Column(
@@ -258,15 +272,19 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
             Row(
               children: [
                 Container(
-                  padding: const EdgeInsets.all(8),
+                  padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(color: theme.colorScheme.primary.withValues(alpha: 0.2), shape: BoxShape.circle),
-                  child: Icon(Icons.directions_rounded, color: theme.colorScheme.primary),
+                  child: Icon(
+                    state.status == NavigationStatus.navigating ? Icons.turn_right_rounded : Icons.directions_rounded, 
+                    color: theme.colorScheme.primary,
+                    size: 28,
+                  ),
                 ),
                 const SizedBox(width: 16),
                 Expanded(
                   child: Text(
                     state.nextInstruction ?? "Calibrated & Ready",
-                    style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                    style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w900),
                   ),
                 ),
               ],
@@ -276,11 +294,14 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
                 padding: EdgeInsets.symmetric(vertical: 12.0),
                 child: Divider(color: Colors.white10, height: 1),
               ),
-              TripStatsRow(
-                eta: state.estimatedTimeRemaining,
-                steps: state.stepsCount,
-                h3Cell: state.currentH3Cell,
-              ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  _buildSmallStat('Distance', '${state.currentDistanceWalked?.toStringAsFixed(1)}m', Colors.blueAccent),
+                  _buildSmallStat('Steps', '${state.stepsCount}', Colors.greenAccent),
+                  _buildSmallStat('Zone', state.currentH3Cell != null ? 'Active' : 'Unknown', Colors.orangeAccent),
+                ],
+              )
             ]
           ],
         ),
@@ -358,7 +379,6 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
                 setState(() { _isMapping = true; _mappingLabel = nameController.text; });
                 context.read<NavigationBloc>().add(const StartMapping());
                 
-                // Drop the first waypoint at the anchor
                 final state = context.read<NavigationBloc>().state;
                 if (state.currentPosition != null) {
                   context.read<NavigationBloc>().add(const AddWaypoint());
