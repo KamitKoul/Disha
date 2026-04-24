@@ -19,7 +19,7 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
   final SpatialHash _spatialHash = SpatialHash(cellSize: 2.0);
 
   // EMA (Exponential Moving Average) for extreme smoothing
-  static const double _emaAlpha = 0.2; 
+  static const double _emaAlpha = 0.15; // Even smoother
   Vector3? _smoothedPosition;
   double _smoothedHeading = 0.0;
   
@@ -57,7 +57,7 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
     double diff = raw - _smoothedHeading;
     if (diff > 180) diff -= 360;
     if (diff < -180) diff += 360;
-    _smoothedHeading = (_smoothedHeading + 0.1 * diff) % 360; // Extra smooth heading
+    _smoothedHeading = (_smoothedHeading + 0.1 * diff) % 360;
     if (_smoothedHeading < 0) _smoothedHeading += 360;
     
     emit(state.copyWith(currentHeading: _smoothedHeading));
@@ -198,10 +198,16 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
       }
       GpsConverter.convertGraphToLocalCoordinates(graph, nodeId, event.heading);
       _rebuildSpatialHash();
+      
+      // Reset position tracking on re-calibration
+      _smoothedPosition = null;
+      _lastLegitPosition = null;
+
       emit(state.copyWith(
         status: state.destinationId != null ? NavigationStatus.calculating : NavigationStatus.idle,
         currentNodeId: nodeId,
         stepsCount: 0,
+        currentDistanceWalked: 0.0,
         currentH3Cell: graph[nodeId]?.h3Cell,
         currentHeading: event.heading,
       ));
@@ -230,6 +236,8 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
     if (_smoothedPosition == null) {
       _smoothedPosition = rawPos.clone();
       _lastLegitPosition = rawPos.clone();
+      emit(state.copyWith(currentPosition: _smoothedPosition));
+      return;
     } else {
       _smoothedPosition = Vector3(
         _smoothedPosition!.x + _emaAlpha * (rawPos.x - _smoothedPosition!.x),
@@ -239,37 +247,38 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
     }
     final currentPos = _smoothedPosition!;
     
-    // VIBRATION GATE: Ignore movements smaller than 15cm (common AR jitter range)
+    // VIBRATION GATE: Ignore movements smaller than 25cm (stricter filter)
     double distanceSinceLastLegit = currentPos.distanceTo(_lastLegitPosition!);
-    bool isActuallyMoving = distanceSinceLastLegit > 0.15;
-
-    // VELOCITY FILTER: Ignore teleportation jumps > 1.5m per update (sensor drift)
-    // 1.5m in 100ms is 15m/s, which is impossible for indoor walking.
-    if (distanceSinceLastLegit > 1.5) {
-       _lastLegitPosition = currentPos.clone(); // Resync without adding to distance
-       return;
-    }
-
-    if (!isActuallyMoving && state.currentPosition != null) {
+    
+    // VELOCITY FILTER: Ignore teleportation jumps > 1.2m per update (sensor drift)
+    if (distanceSinceLastLegit > 1.2) {
+       _lastLegitPosition = currentPos.clone(); 
        emit(state.copyWith(currentPosition: currentPos));
        return;
     }
 
-    _lastLegitPosition = currentPos.clone();
+    if (distanceSinceLastLegit < 0.25) {
+       emit(state.copyWith(currentPosition: currentPos));
+       return;
+    }
 
+    // Only update stats if navigating or mapping
     if (state.status != NavigationStatus.navigating && state.status != NavigationStatus.mapping) {
+      _lastLegitPosition = currentPos.clone();
       emit(state.copyWith(currentPosition: currentPos));
       return;
     }
 
-    // Update cumulative distance only on legit movement
+    // Legit movement detected
+    _lastLegitPosition = currentPos.clone();
     final totalDistance = (state.currentDistanceWalked ?? 0.0) + distanceSinceLastLegit;
+    final int totalSteps = (totalDistance * 1.3).toInt();
 
     if (state.status == NavigationStatus.mapping) {
       emit(state.copyWith(
         currentPosition: currentPos,
         currentDistanceWalked: totalDistance,
-        stepsCount: (totalDistance * 1.3).toInt(),
+        stepsCount: totalSteps,
       ));
       return;
     }
@@ -317,7 +326,7 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
           nextInstruction: "You have arrived!",
           currentPosition: currentPos,
           currentDistanceWalked: totalDistance,
-          stepsCount: (totalDistance * 1.3).toInt(),
+          stepsCount: totalSteps,
         ));
       } else {
         _triggerHapticTurnPreview(currentIdx);
@@ -327,7 +336,7 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
           nextInstruction: _getInstruction(snappedPos, state.route[nextIdx]),
           currentPosition: snappedPos, 
           currentDistanceWalked: totalDistance,
-          stepsCount: (totalDistance * 1.3).toInt(),
+          stepsCount: totalSteps,
         ));
       }
     } else {
@@ -336,7 +345,7 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
         nextInstruction: _getInstruction(snappedPos, nextWaypoint),
         currentPosition: snappedPos, 
         currentDistanceWalked: totalDistance,
-        stepsCount: (totalDistance * 1.3).toInt(),
+        stepsCount: totalSteps,
       ));
     }
   }
