@@ -68,6 +68,12 @@ class AddWaypoint extends NavigationEvent {
   List<Object?> get props => [];
 }
 
+class ManualNextWaypoint extends NavigationEvent {
+  const ManualNextWaypoint();
+  @override
+  List<Object?> get props => [];
+}
+
 class LogLocation extends NavigationEvent {
   final String label;
   final String category;
@@ -97,4 +103,3 @@ class StartMapping extends NavigationEvent {
 class StopMapping extends NavigationEvent {
   const StopMapping();
 }
-
