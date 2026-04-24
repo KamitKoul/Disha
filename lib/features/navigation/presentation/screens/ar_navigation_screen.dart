@@ -31,6 +31,13 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
   void initState() {
     super.initState();
     TtsService().init();
+    
+    // Check if already calibrated (e.g., if navigating back or state persisted)
+    final initialState = context.read<NavigationBloc>().state;
+    if (initialState.currentNodeId != null) {
+      _isCalibrated = true;
+    }
+
     _initTimer = Timer(const Duration(milliseconds: 1500), () {
       if (mounted) {
         setState(() => _showAr = true);
@@ -63,12 +70,16 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // FIXED AR LAYER: Move outside BlocConsumer to stop jitter
+          // FIXED AR LAYER
           if (_showAr) const ArViewWidget(),
           
           // UI OVERLAY LAYER
           BlocConsumer<NavigationBloc, NavigationState>(
-            listenWhen: (prev, curr) => prev.status != curr.status || prev.currentNodeId != curr.currentNodeId || prev.nextInstruction != curr.nextInstruction,
+            listenWhen: (prev, curr) => 
+                prev.status != curr.status || 
+                prev.currentNodeId != curr.currentNodeId || 
+                prev.nextInstruction != curr.nextInstruction ||
+                (prev.currentNodeId == null && curr.currentNodeId != null),
             listener: (context, state) {
               if (state.currentNodeId != null && !_isCalibrated) {
                 setState(() => _isCalibrated = true);
@@ -82,7 +93,6 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
                  }
               }
               
-              // Native path rendering listeners
               if (state.status == NavigationStatus.navigating) {
                 ArService().renderPath(state.route);
               }
@@ -100,9 +110,11 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
               return Stack(
                 fit: StackFit.expand,
                 children: [
-                  if (!_isCalibrated) _buildCalibrationOverlay(context, theme),
+                  // Show calibration overlay only if NOT calibrated AND not in mapping/navigating state
+                  if (!_isCalibrated && state.currentNodeId == null) 
+                    _buildCalibrationOverlay(context, theme),
 
-                  if (_isCalibrated)
+                  if (_isCalibrated || state.currentNodeId != null)
                     Positioned(
                       top: MediaQuery.of(context).padding.top + 12,
                       left: 16,
@@ -118,10 +130,10 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
                       child: _buildMappingCard(context, state, theme),
                     ),
                   
-                  if (_isCalibrated && state.status != NavigationStatus.mapping)
+                  if ((_isCalibrated || state.currentNodeId != null) && state.status != NavigationStatus.mapping)
                     const Positioned(bottom: 32, right: 16, child: MinimapWidget()),
 
-                  if (_isCalibrated)
+                  if (_isCalibrated || state.currentNodeId != null)
                     Positioned(
                       bottom: 32,
                       left: 16,
@@ -153,9 +165,14 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
             const Text('WAITING FOR CALIBRATION', style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w900, letterSpacing: 1.5)),
             const Padding(
               padding: EdgeInsets.all(32.0),
-              child: Text('Scan the QR code to start.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white70)),
+              child: Text('Scan the QR code to start navigation.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white70)),
             ),
-            const CircularProgressIndicator(color: Colors.blueAccent),
+            const SizedBox(height: 20),
+            ElevatedButton.icon(
+              onPressed: () => Navigator.pushNamed(context, '/scanner'),
+              icon: const Icon(Icons.camera_alt),
+              label: const Text('OPEN SCANNER'),
+            ),
           ],
         ),
       ),
@@ -196,7 +213,6 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
   }
 
   Widget _buildDirectionalArrow(NavigationState state, ThemeData theme) {
-    // Arrow needs high-frequency updates, so we use a separate BlocBuilder for just the rotation
     return BlocBuilder<NavigationBloc, NavigationState>(
       buildWhen: (prev, curr) => prev.currentPosition != curr.currentPosition || prev.currentWaypointIndex != curr.currentWaypointIndex,
       builder: (context, state) {
@@ -317,7 +333,7 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
     final TextEditingController nameController = TextEditingController();
     showDialog(
       context: context,
-      barrierDismissible: false, // Prevent accidental dismissal
+      barrierDismissible: false,
       builder: (dialogContext) => AlertDialog(
         backgroundColor: const Color(0xFF1E293B),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
@@ -341,6 +357,13 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
               if (nameController.text.isNotEmpty) {
                 setState(() { _isMapping = true; _mappingLabel = nameController.text; });
                 context.read<NavigationBloc>().add(const StartMapping());
+                
+                // Drop the first waypoint at the anchor
+                final state = context.read<NavigationBloc>().state;
+                if (state.currentPosition != null) {
+                  context.read<NavigationBloc>().add(const AddWaypoint());
+                }
+                
                 Navigator.pop(dialogContext);
               }
             },
