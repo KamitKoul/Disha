@@ -97,6 +97,7 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
     emit(state.copyWith(
       status: NavigationStatus.idle,
       destinationId: state.destinationId == event.id ? null : state.destinationId,
+      lastActionFeedback: "Location deleted successfully.",
     ));
   }
 
@@ -107,6 +108,7 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
       currentDistanceWalked: 0.0,
       stepsCount: 0,
       mappingPath: [], 
+      lastActionFeedback: null,
     ));
   }
 
@@ -160,13 +162,14 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
         await MapService.saveNode(graph[previousNodeId]!);
         previousNodeId = wpId;
       }
-      HapticFeedback.mediumImpact();
+      HapticFeedback.heavyImpact();
     }
 
     emit(state.copyWith(
       status: NavigationStatus.idle,
       destinationId: id,
       nextInstruction: "Learned: ${event.label}",
+      lastActionFeedback: "Room '${event.label}' saved successfully!",
     ));
   }
 
@@ -230,6 +233,7 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
         currentDistanceWalked: 0.0,
         currentH3Cell: graph[nodeId]?.h3Cell,
         currentHeading: event.heading,
+        lastActionFeedback: "Localized at ${graph[nodeId]?.label}",
       ));
       if (state.destinationId != null) {
         _calculateAndEmitRoute(nodeId, state.destinationId!, emit);

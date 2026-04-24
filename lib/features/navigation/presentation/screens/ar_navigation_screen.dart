@@ -76,11 +76,26 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
                 prev.status != curr.status || 
                 prev.currentNodeId != curr.currentNodeId || 
                 prev.nextInstruction != curr.nextInstruction ||
+                prev.lastActionFeedback != curr.lastActionFeedback ||
                 (prev.currentNodeId == null && curr.currentNodeId != null),
             listener: (context, state) {
               if (state.currentNodeId != null && !_isCalibrated) {
                 setState(() => _isCalibrated = true);
               }
+
+              // SHOW FEEDBACK SNACKBAR
+              if (state.lastActionFeedback != null) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(state.lastActionFeedback!, style: const TextStyle(fontWeight: FontWeight.bold)),
+                    backgroundColor: theme.colorScheme.primary,
+                    behavior: SnackBarBehavior.floating,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    duration: const Duration(seconds: 3),
+                  ),
+                );
+              }
+
               if (state.nextInstruction != null && state.nextInstruction != _lastSpokenInstruction) {
                  final now = DateTime.now().millisecondsSinceEpoch;
                  if (now - _lastSpokenTime > 4000) {
@@ -103,7 +118,7 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
                 prev.stepsCount != curr.stepsCount ||
                 prev.currentWaypointIndex != curr.currentWaypointIndex ||
                 prev.currentNodeId != curr.currentNodeId ||
-                prev.currentHeading != curr.currentHeading, // Rebuild arrow on compass change
+                prev.currentHeading != curr.currentHeading,
             builder: (context, state) {
               return Stack(
                 fit: StackFit.expand,
@@ -242,21 +257,12 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
 
   double _calculateArrowAngle(NavigationState state) {
     if (state.route.isEmpty || state.currentWaypointIndex >= state.route.length) return 0.0;
-    
-    // COMPASS-BASED ARROW (Immune to AR Tracking Glitches)
     final target = state.route[state.currentWaypointIndex];
     final current = state.route[math.max(0, state.currentWaypointIndex - 1)]; 
-    
     double dx = target.x - current.x;
-    double dz = target.z - current.z; // AR Forward is -Z
-    
-    // Absolute bearing to target
+    double dz = target.z - current.z;
     double bearingToTarget = math.atan2(dx, -dz);
-    
-    // Phone's current magnetic heading
     double phoneHeadingRad = state.currentHeading * (math.pi / 180.0);
-    
-    // The arrow points towards the target, relative to where the phone is looking
     return bearingToTarget - phoneHeadingRad;
   }
 

@@ -6,11 +6,11 @@ class NavigationState extends Equatable {
   final NavigationStatus status;
   final String? currentNodeId;
   final String? destinationId;
+  final String? errorMessage;
+  final String? nextInstruction;
   final List<Vector3> route;
   final int currentWaypointIndex;
   final double? currentDistance;
-  final String? nextInstruction;
-  final String? errorMessage;
   final Vector3? currentPosition;
   final bool isMuted;
   final bool isWheelchairAccessible;
@@ -20,16 +20,17 @@ class NavigationState extends Equatable {
   final double? currentDistanceWalked;
   final List<Vector3> mappingPath;
   final double currentHeading;
+  final String? lastActionFeedback; // Added field for user feedback
 
   const NavigationState({
     this.status = NavigationStatus.idle,
     this.currentNodeId,
     this.destinationId,
+    this.errorMessage,
+    this.nextInstruction,
     this.route = const [],
     this.currentWaypointIndex = 0,
     this.currentDistance,
-    this.nextInstruction,
-    this.errorMessage,
     this.currentPosition,
     this.isMuted = false,
     this.isWheelchairAccessible = false,
@@ -39,17 +40,18 @@ class NavigationState extends Equatable {
     this.currentDistanceWalked = 0.0,
     this.mappingPath = const [],
     this.currentHeading = 0.0,
+    this.lastActionFeedback,
   });
 
   NavigationState copyWith({
     NavigationStatus? status,
     String? currentNodeId,
     String? destinationId,
+    String? errorMessage,
+    String? nextInstruction,
     List<Vector3>? route,
     int? currentWaypointIndex,
     double? currentDistance,
-    String? nextInstruction,
-    String? errorMessage,
     Vector3? currentPosition,
     bool? isMuted,
     bool? isWheelchairAccessible,
@@ -59,16 +61,17 @@ class NavigationState extends Equatable {
     double? currentDistanceWalked,
     List<Vector3>? mappingPath,
     double? currentHeading,
+    String? lastActionFeedback,
   }) {
     return NavigationState(
       status: status ?? this.status,
       currentNodeId: currentNodeId ?? this.currentNodeId,
       destinationId: destinationId ?? this.destinationId,
+      errorMessage: errorMessage ?? this.errorMessage,
+      nextInstruction: nextInstruction ?? this.nextInstruction,
       route: route ?? this.route,
       currentWaypointIndex: currentWaypointIndex ?? this.currentWaypointIndex,
       currentDistance: currentDistance ?? this.currentDistance,
-      nextInstruction: nextInstruction ?? this.nextInstruction,
-      errorMessage: errorMessage ?? this.errorMessage,
       currentPosition: currentPosition ?? this.currentPosition,
       isMuted: isMuted ?? this.isMuted,
       isWheelchairAccessible: isWheelchairAccessible ?? this.isWheelchairAccessible,
@@ -78,6 +81,7 @@ class NavigationState extends Equatable {
       currentDistanceWalked: currentDistanceWalked ?? this.currentDistanceWalked,
       mappingPath: mappingPath ?? this.mappingPath,
       currentHeading: currentHeading ?? this.currentHeading,
+      lastActionFeedback: lastActionFeedback ?? this.lastActionFeedback,
     );
   }
 
@@ -86,11 +90,11 @@ class NavigationState extends Equatable {
         status,
         currentNodeId,
         destinationId,
+        errorMessage,
+        nextInstruction,
         route,
         currentWaypointIndex,
         currentDistance,
-        nextInstruction,
-        errorMessage,
         currentPosition,
         isMuted,
         isWheelchairAccessible,
@@ -100,8 +104,6 @@ class NavigationState extends Equatable {
         currentDistanceWalked,
         mappingPath,
         currentHeading,
+        lastActionFeedback,
       ];
 }
-
-
-
