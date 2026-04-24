@@ -20,6 +20,8 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
   final SpatialHash _spatialHash = SpatialHash(cellSize: 2.0);
 
   Vector3? _lastLegitPosition;
+  double _stepBuffer = 0.0; // Cumulative distance waiting to become a 'step'
+  DateTime _lastMovementTime = DateTime.now();
   StreamSubscription<CompassEvent>? _compassSubscription;
 
   NavigationBloc({required this.graph}) : super(const NavigationState()) {
@@ -100,18 +102,19 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
     emit(state.copyWith(
       status: NavigationStatus.idle,
       destinationId: state.destinationId == event.id ? null : state.destinationId,
-      lastActionFeedback: "Location deleted.",
+      lastActionFeedback: "Location deleted successfully.",
     ));
   }
 
   void _onStartMapping(StartMapping event, Emitter<NavigationState> emit) {
     _lastLegitPosition = null;
+    _stepBuffer = 0.0;
     emit(state.copyWith(
       status: NavigationStatus.mapping,
       currentDistanceWalked: 0.0,
       stepsCount: 0,
       mappingPath: [], 
-      lastActionFeedback: "Mapping started.",
+      lastActionFeedback: null,
     ));
   }
 
@@ -177,7 +180,7 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
       status: NavigationStatus.idle,
       destinationId: id,
       nextInstruction: "Saved: ${event.label}",
-      lastActionFeedback: "Room saved successfully!",
+      lastActionFeedback: "Room '${event.label}' saved successfully!",
     ));
   }
 
@@ -232,6 +235,7 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
       GpsConverter.convertGraphToLocalCoordinates(graph, nodeId, event.heading);
       _rebuildSpatialHash();
       _lastLegitPosition = null;
+      _stepBuffer = 0.0;
 
       emit(state.copyWith(
         status: state.destinationId != null ? NavigationStatus.calculating : NavigationStatus.idle,
@@ -240,13 +244,13 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
         currentDistanceWalked: 0.0,
         currentH3Cell: graph[nodeId]?.h3Cell,
         currentHeading: event.heading,
-        lastActionFeedback: "Anchored at ${graph[nodeId]?.label}",
+        lastActionFeedback: "Localized at ${graph[nodeId]?.label}",
       ));
       if (state.destinationId != null) {
         _calculateAndEmitRoute(nodeId, state.destinationId!, emit);
       }
     } catch (e) {
-      emit(state.copyWith(status: NavigationStatus.error, errorMessage: 'QR scan failed.'));
+      emit(state.copyWith(status: NavigationStatus.error, errorMessage: 'Invalid QR payload'));
     }
   }
 
@@ -271,76 +275,100 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
 
     double dist = rawPos.distanceTo(_lastLegitPosition!);
 
-    // CHECKPOINT-SYNC LOGIC:
-    // If the sensor jumps > 0.8m in 100ms, ignore it (Glitched tracking)
-    if (dist > 0.8) return; 
+    // 1. HARD GLITCH REJECTION
+    if (dist > 0.8) {
+       _lastLegitPosition = rawPos.clone(); // Resync but ignore the distance
+       return; 
+    }
 
-    // Ignore vibrations < 10cm
-    if (dist < 0.1) {
+    // 2. IDLE JITTER PROTECTION
+    // If we haven't moved at least 5cm, it's vibration. Ignore it.
+    if (dist < 0.05) {
        emit(state.copyWith(currentPosition: rawPos));
        return;
     }
 
     _lastLegitPosition = rawPos.clone();
     
+    // Only process distance if we are Mapping or Navigating
     if (state.status != NavigationStatus.navigating && state.status != NavigationStatus.mapping) {
       emit(state.copyWith(currentPosition: rawPos));
       return;
     }
 
-    final totalDistance = (state.currentDistanceWalked ?? 0.0) + dist;
-    final int totalSteps = (totalDistance * 1.3).toInt();
-
-    if (state.status == NavigationStatus.mapping) {
-      emit(state.copyWith(
-        currentPosition: rawPos,
-        currentDistanceWalked: totalDistance,
-        stepsCount: totalSteps,
-      ));
-      return;
+    // 3. THE STEP GATE (STRIDE SYNC)
+    // We collect the distance in a buffer. We only "confirm" the movement 
+    // when the user has covered 0.7m (a human step).
+    _stepBuffer += dist;
+    
+    // Auto-clear buffer if standing still for 2 seconds (sensor noise cleanup)
+    final now = DateTime.now();
+    if (now.difference(_lastMovementTime).inSeconds > 2) {
+      _stepBuffer = 0.0;
     }
+    _lastMovementTime = now;
 
-    if (state.route.isEmpty) return;
+    if (_stepBuffer >= 0.7) {
+      // CONFIRMED LEGIT STEP
+      final double confirmDist = _stepBuffer;
+      _stepBuffer = 0.0; // Reset for next step
 
-    // TURN-BY-TURN LOGIC
-    final currentIdx = state.currentWaypointIndex;
-    final target = state.route[currentIdx];
-    final distanceToTarget = rawPos.distanceTo(target);
+      final totalDistance = (state.currentDistanceWalked ?? 0.0) + confirmDist;
+      final int totalSteps = state.stepsCount + 1;
 
-    // Auto-advance turn if within 1.5 meters
-    if (distanceToTarget < 1.5) { 
-      final nextIdx = currentIdx + 1;
-      if (nextIdx >= state.route.length) {
-        HapticFeedback.heavyImpact();
+      if (state.status == NavigationStatus.mapping) {
         emit(state.copyWith(
-          status: NavigationStatus.arrived,
-          currentWaypointIndex: currentIdx,
-          currentDistance: 0,
-          nextInstruction: "You have arrived!",
           currentPosition: rawPos,
           currentDistanceWalked: totalDistance,
           stepsCount: totalSteps,
         ));
+        return;
+      }
+
+      if (state.route.isEmpty) return;
+
+      // TURN-BY-TURN LOGIC
+      final currentIdx = state.currentWaypointIndex;
+      final target = state.route[currentIdx];
+      final distanceToTarget = rawPos.distanceTo(target);
+
+      if (distanceToTarget < 1.5) { 
+        final nextIdx = currentIdx + 1;
+        if (nextIdx >= state.route.length) {
+          HapticFeedback.heavyImpact();
+          emit(state.copyWith(
+            status: NavigationStatus.arrived,
+            currentWaypointIndex: currentIdx,
+            currentDistance: 0,
+            nextInstruction: "You have arrived!",
+            currentPosition: rawPos,
+            currentDistanceWalked: totalDistance,
+            stepsCount: totalSteps,
+          ));
+        } else {
+          _triggerHapticTurnPreview(currentIdx);
+          final nextTarget = state.route[nextIdx];
+          emit(state.copyWith(
+            currentWaypointIndex: nextIdx,
+            currentDistance: rawPos.distanceTo(nextTarget),
+            nextInstruction: _getInstruction(rawPos, nextTarget),
+            currentPosition: rawPos, 
+            currentDistanceWalked: totalDistance,
+            stepsCount: totalSteps,
+          ));
+        }
       } else {
-        _triggerHapticTurnPreview(currentIdx);
-        final nextTarget = state.route[nextIdx];
         emit(state.copyWith(
-          currentWaypointIndex: nextIdx,
-          currentDistance: rawPos.distanceTo(nextTarget),
-          nextInstruction: _getInstruction(rawPos, nextTarget),
+          currentDistance: distanceToTarget,
+          nextInstruction: _getInstruction(rawPos, target),
           currentPosition: rawPos, 
           currentDistanceWalked: totalDistance,
           stepsCount: totalSteps,
         ));
       }
     } else {
-      emit(state.copyWith(
-        currentDistance: distanceToTarget,
-        nextInstruction: _getInstruction(rawPos, target),
-        currentPosition: rawPos, 
-        currentDistanceWalked: totalDistance,
-        stepsCount: totalSteps,
-      ));
+      // NOT ENOUGH FOR A STEP: Just update camera position but don't move the numbers
+      emit(state.copyWith(currentPosition: rawPos));
     }
   }
 
