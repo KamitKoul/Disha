@@ -18,9 +18,13 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
   final Map<String, Node> graph;
   final SpatialHash _spatialHash = SpatialHash(cellSize: 2.0);
 
-  static const double _emaAlpha = 0.35; 
+  // EMA (Exponential Moving Average) for extreme smoothing
+  static const double _emaAlpha = 0.2; 
   Vector3? _smoothedPosition;
   double _smoothedHeading = 0.0;
+  
+  // Vibration/Jitter Filter
+  Vector3? _lastLegitPosition;
 
   NavigationBloc({required this.graph}) : super(const NavigationState()) {
     _loadCustomNodes();
@@ -41,7 +45,7 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
 
   void _onAddWaypoint(AddWaypoint event, Emitter<NavigationState> emit) {
     if (state.currentPosition != null && state.status == NavigationStatus.mapping) {
-      HapticFeedback.heavyImpact();
+      HapticFeedback.mediumImpact();
       emit(state.copyWith(
         mappingPath: [...state.mappingPath, state.currentPosition!],
       ));
@@ -53,7 +57,7 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
     double diff = raw - _smoothedHeading;
     if (diff > 180) diff -= 360;
     if (diff < -180) diff += 360;
-    _smoothedHeading = (_smoothedHeading + _emaAlpha * diff) % 360;
+    _smoothedHeading = (_smoothedHeading + 0.1 * diff) % 360; // Extra smooth heading
     if (_smoothedHeading < 0) _smoothedHeading += 360;
     
     emit(state.copyWith(currentHeading: _smoothedHeading));
@@ -69,13 +73,13 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
     emit(state.copyWith(
       status: NavigationStatus.idle,
       destinationId: state.destinationId == event.id ? null : state.destinationId,
-      nextInstruction: "Location deleted.",
     ));
   }
 
 
   void _onStartMapping(StartMapping event, Emitter<NavigationState> emit) {
     _smoothedPosition = null; 
+    _lastLegitPosition = null;
     emit(state.copyWith(
       status: NavigationStatus.mapping,
       currentDistanceWalked: 0.0,
@@ -112,17 +116,13 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
     }
 
     final anchorId = state.currentNodeId ?? 'home_entrance';
-    
-    // Add the final position as the last waypoint
     mappedPath.add(event.position);
 
     if (mappedPath.isNotEmpty) {
       String previousNodeId = anchorId;
-      
       for (int i = 0; i < mappedPath.length; i++) {
         final isLast = i == mappedPath.length - 1;
         final wpId = isLast ? id : '${id}_wp$i';
-        
         final wpNode = Node(
           id: wpId,
           label: isLast ? event.label : '${event.label} Waypoint $i',
@@ -131,27 +131,21 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
           h3Cell: state.currentH3Cell ?? '',
           neighbors: {previousNodeId: 'walk'},
         );
-        
         graph[wpId] = wpNode;
         _spatialHash.addNode(wpNode);
         await MapService.saveNode(wpNode);
-        
         graph[previousNodeId]?.neighbors[wpId] = 'walk';
         await MapService.saveNode(graph[previousNodeId]!);
-        
         previousNodeId = wpId;
       }
-      
       HapticFeedback.mediumImpact();
     }
 
     emit(state.copyWith(
-      status: NavigationStatus.calculating,
+      status: NavigationStatus.idle,
       destinationId: id,
       nextInstruction: "Learned: ${event.label}",
     ));
-
-    _calculateAndEmitRoute(anchorId, id, emit);
   }
 
   void _onToggleVoice(ToggleVoice event, Emitter<NavigationState> emit) {
@@ -231,8 +225,11 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
 
   void _onUpdateCurrentPosition(UpdateCurrentPosition event, Emitter<NavigationState> emit) {
     final rawPos = event.position;
+    
+    // EMA smoothing to ignore high-frequency vibration noise
     if (_smoothedPosition == null) {
       _smoothedPosition = rawPos.clone();
+      _lastLegitPosition = rawPos.clone();
     } else {
       _smoothedPosition = Vector3(
         _smoothedPosition!.x + _emaAlpha * (rawPos.x - _smoothedPosition!.x),
@@ -242,21 +239,31 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
     }
     final currentPos = _smoothedPosition!;
     
-    if (state.currentPosition != null && currentPos.distanceTo(state.currentPosition!) < 0.05) return;
+    // VIBRATION GATE: Ignore movements smaller than 15cm (common AR jitter range)
+    double distanceSinceLastLegit = currentPos.distanceTo(_lastLegitPosition!);
+    bool isActuallyMoving = distanceSinceLastLegit > 0.15;
+
+    if (!isActuallyMoving && state.currentPosition != null) {
+       // Still emit position for the AR view, but don't update navigation/stats
+       emit(state.copyWith(currentPosition: currentPos));
+       return;
+    }
+
+    _lastLegitPosition = currentPos.clone();
 
     if (state.status != NavigationStatus.navigating && state.status != NavigationStatus.mapping) {
       emit(state.copyWith(currentPosition: currentPos));
       return;
     }
 
-    double distanceMoved = state.currentPosition != null ? currentPos.distanceTo(state.currentPosition!) : 0.0;
-    final totalDistance = (state.currentDistanceWalked ?? 0.0) + distanceMoved;
+    // Update cumulative distance only on legit movement
+    final totalDistance = (state.currentDistanceWalked ?? 0.0) + distanceSinceLastLegit;
 
     if (state.status == NavigationStatus.mapping) {
       emit(state.copyWith(
         currentPosition: currentPos,
         currentDistanceWalked: totalDistance,
-        stepsCount: (totalDistance * 1.31).toInt(),
+        stepsCount: (totalDistance * 1.3).toInt(),
       ));
       return;
     }
@@ -266,6 +273,7 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
       return;
     }
 
+    // Path snapping logic
     final currentIdx = state.currentWaypointIndex;
     double minDistanceToRoute = double.infinity;
     Vector3 snappedPos = currentPos; 
@@ -289,20 +297,10 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
       }
     }
 
-    if (minDistanceToRoute > 3.0 && state.destinationId != null) {
-      final nearestNode = _spatialHash.findNearestNode(currentPos);
-      if (nearestNode != null) {
-        HapticFeedback.vibrate();
-        emit(state.copyWith(status: NavigationStatus.calculating, nextInstruction: "Rerouting...", currentPosition: currentPos));
-        _calculateAndEmitRoute(nearestNode.id, state.destinationId!, emit);
-        return;
-      }
-    }
-
     final nextWaypoint = state.route[currentIdx];
-    final distance = currentPos.distanceTo(nextWaypoint);
+    final distanceToTarget = currentPos.distanceTo(nextWaypoint);
 
-    if (distance < 1.2) { 
+    if (distanceToTarget < 1.3) { 
       final nextIdx = currentIdx + 1;
       if (nextIdx >= state.route.length) {
         HapticFeedback.heavyImpact();
@@ -313,8 +311,7 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
           nextInstruction: "You have arrived!",
           currentPosition: currentPos,
           currentDistanceWalked: totalDistance,
-          stepsCount: (totalDistance * 1.31).toInt(),
-          estimatedTimeRemaining: Duration.zero,
+          stepsCount: (totalDistance * 1.3).toInt(),
         ));
       } else {
         _triggerHapticTurnPreview(currentIdx);
@@ -324,16 +321,16 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
           nextInstruction: _getInstruction(snappedPos, state.route[nextIdx]),
           currentPosition: snappedPos, 
           currentDistanceWalked: totalDistance,
-          stepsCount: (totalDistance * 1.31).toInt(),
+          stepsCount: (totalDistance * 1.3).toInt(),
         ));
       }
     } else {
       emit(state.copyWith(
-        currentDistance: distance,
+        currentDistance: distanceToTarget,
         nextInstruction: _getInstruction(snappedPos, nextWaypoint),
         currentPosition: snappedPos, 
         currentDistanceWalked: totalDistance,
-        stepsCount: (totalDistance * 1.31).toInt(),
+        stepsCount: (totalDistance * 1.3).toInt(),
       ));
     }
   }
@@ -344,8 +341,6 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
     final v2 = state.route[currentIdx + 2] - state.route[currentIdx + 1];
     final angle = _calculateAngle(v1, v2);
     if (angle.abs() > 0.5) { 
-      await HapticFeedback.mediumImpact();
-      await Future.delayed(const Duration(milliseconds: 150));
       await HapticFeedback.mediumImpact();
     }
   }
@@ -363,7 +358,7 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
     final distance = current.distanceTo(target);
     if (distance < 1.5) return "Arriving shortly...";
     final int stableDistance = distance > 10.0 ? (distance / 5.0).round() * 5 : distance.round();
-    return "Continue straight for $stableDistance meters";
+    return "Walk straight for $stableDistance meters";
   }
 
   void _calculateAndEmitRoute(String startId, String endId, Emitter<NavigationState> emit) async {
