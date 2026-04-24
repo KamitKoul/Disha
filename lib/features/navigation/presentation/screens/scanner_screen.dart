@@ -24,6 +24,7 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
   bool _hasScanned = false;
   bool _showingSheet = false;
   late AnimationController _animationController;
+  bool _isDisposed = false;
 
   @override
   void initState() {
@@ -63,7 +64,7 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
       ),
       body: BlocListener<NavigationBloc, NavigationState>(
         listener: (context, state) {
-          if (state.currentNodeId != null && !_showingSheet) {
+          if (state.currentNodeId != null && !_showingSheet && !_hasScanned) {
             if (state.destinationId == null) {
               _showDestinationPicker(this.context);
             } else {
@@ -96,7 +97,7 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
                     MobileScanner(
                       controller: controller,
                       onDetect: (capture) async {
-                        if (_hasScanned) return;
+                        if (_hasScanned || _isDisposed) return;
                         final List<Barcode> barcodes = capture.barcodes;
                         
                         for (final barcode in barcodes) {
@@ -126,7 +127,6 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
                                 // HARD STOP: Release hardware immediately
                                 try {
                                   await controller.stop();
-                                  // We don't dispose here yet, we do it after the navigation choice
                                 } catch (e) {
                                   debugPrint('Scanner stop error: $e');
                                 }
@@ -147,12 +147,13 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
                                   heading
                                 ));
                                 
-                                // We no longer call _showDestinationPicker here. 
-                                // The BlocListener above will handle it reactively.
+                                // Show picker if not automatically navigated
+                                _showDestinationPicker(this.context);
                               }
                             } catch (e) {
                               if (mounted) {
                                 setState(() => _hasScanned = false);
+                                _restartScanner();
                               }
                             }
                             break;
@@ -271,15 +272,18 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
                                   if (mounted) {
                                     setState(() {
                                       _hasScanned = true;
-                                      _showingSheet = true; // Prevent the reactive listener from showing the picker
+                                      _showingSheet = true; 
                                     });
                                   }
                                   
                                   navBloc.add(const ScanQRCode('{"id":"home_entrance"}', 0.0));
                                   
                                   // 2. Shut down the scanner hardware safely
-                                  await controller.stop();
-                                  await controller.dispose();
+                                  try {
+                                    await controller.stop();
+                                  } catch (e) {
+                                    debugPrint('Scanner stop error: $e');
+                                  }
                                   
                                   // 3. Jump straight to the AR camera for mapping
                                   if (mounted) {
@@ -319,6 +323,7 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
 
   @override
   void dispose() {
+    _isDisposed = true;
     controller.dispose();
     _animationController.dispose();
     super.dispose();
@@ -326,11 +331,13 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
 
 
   void _restartScanner() async {
-    if (_hasScanned) return;
+    if (_hasScanned || _isDisposed) return;
     try {
       // Small delay to ensure any previous lifecycle events finished
       await Future.delayed(const Duration(milliseconds: 300));
-      await controller.start();
+      if (!_isDisposed) {
+        await controller.start();
+      }
     } catch (e) {
       debugPrint('Scanner restart error: $e');
     }
@@ -338,9 +345,9 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
 
 
   void _showDestinationPicker(BuildContext context) async {
-    if (mounted) {
-      setState(() => _showingSheet = true);
-    }
+    if (_showingSheet || !mounted) return;
+    
+    setState(() => _showingSheet = true);
     
     final navigator = Navigator.of(this.context);
     
@@ -354,17 +361,8 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
     if (mounted) {
       setState(() => _showingSheet = false);
       if (result == true) {
-        // HARD RELEASE: Dispose the controller immediately
-        try {
-          await controller.stop();
-          await controller.dispose();
-          debugPrint('📸 DISHA: Camera hardware released successfully.');
-        } catch (e) {
-          debugPrint('Scanner disposal error: $e');
-        }
-        
-        // Safety Delay: 2.5s for full hardware camera release on Pixel 7
-        await Future.delayed(const Duration(milliseconds: 2500));
+        // Safety Delay: 1s for full hardware camera release
+        await Future.delayed(const Duration(milliseconds: 1000));
         
         if (mounted) {
           navigator.pushReplacementNamed('/navigation');
