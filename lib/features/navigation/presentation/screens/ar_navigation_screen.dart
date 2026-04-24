@@ -353,7 +353,7 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
 
   Widget _buildArrivalOverlay(BuildContext context, ThemeData theme) {
     return Container(
-      color: Colors.black90,
+      color: Colors.black.withValues(alpha: 0.9),
       child: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
