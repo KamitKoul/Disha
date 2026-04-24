@@ -5,6 +5,7 @@ import 'features/navigation/presentation/screens/scanner_screen.dart';
 import 'features/navigation/presentation/screens/ar_navigation_screen.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(const DishaApp());
 }
 
@@ -15,23 +16,21 @@ class DishaApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return BlocProvider(
       create: (context) => NavigationBloc(graph: {}),
-
       child: MaterialApp(
-        title: 'Disha AR Navigation',
+        title: 'Disha AR',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
           useMaterial3: true,
           brightness: Brightness.dark,
           colorScheme: const ColorScheme.dark(
-            primary: Color(0xFF38BDF8), // Electric blue
-            secondary: Color(0xFFA78BFA), // Neon purple
-            surface: Color(0xFF0F172A), // Deep space blue
-            onSurface: Colors.white,
+            primary: Color(0xFF38BDF8),
+            secondary: Color(0xFFA78BFA),
+            surface: Color(0xFF0F172A),
           ),
           scaffoldBackgroundColor: const Color(0xFF0F172A),
-          fontFamily: 'Inter', // Assuming standard system font
         ),
-        home: const HomeScreen(),
+        // Start directly with the Welcome Screen
+        home: const WelcomeScreen(),
         routes: {
           '/scanner': (context) => const ScannerScreen(),
           '/navigation': (context) => const ArNavigationScreen(),
@@ -41,183 +40,78 @@ class DishaApp extends StatelessWidget {
   }
 }
 
-class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
-
-  @override
-  State<HomeScreen> createState() => _HomeScreenState();
-}
-
-class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this, 
-      duration: const Duration(seconds: 10)
-    )..repeat(reverse: true);
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
+class WelcomeScreen extends StatelessWidget {
+  const WelcomeScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Scaffold(
-      body: Stack(
-        children: [
-          // Animated gradient background
-          AnimatedBuilder(
-            animation: _controller,
-            builder: (context, child) {
-              return Container(
+      body: Container(
+        width: double.infinity,
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xFF1E293B), Color(0xFF0F172A)],
+          ),
+        ),
+        child: SafeArea(
+          child: Column(
+            children: [
+              const Spacer(),
+              // Icon with glow
+              Container(
+                padding: const EdgeInsets.all(24),
                 decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [
-                      const Color(0xFF0F172A),
-                      Color.lerp(const Color(0xFF1E143A), const Color(0xFF0F2537), _controller.value)!,
-                      const Color(0xFF0F172A),
-                    ],
-                    stops: const [0.0, 0.5, 1.0],
-                  ),
+                  shape: BoxShape.circle,
+                  color: theme.colorScheme.primary.withValues(alpha: 0.1),
+                  boxShadow: [
+                    BoxShadow(color: theme.colorScheme.primary.withValues(alpha: 0.2), blurRadius: 40),
+                  ],
                 ),
-              );
-            },
-          ),
-          
-          // Floating glowing orbs
-          Positioned(
-            top: 100, left: -50,
-            child: Container(
-              width: 200, height: 200,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: theme.colorScheme.primary.withValues(alpha: 0.15),
-                boxShadow: [BoxShadow(color: theme.colorScheme.primary.withValues(alpha: 0.3), blurRadius: 100)],
+                child: Icon(Icons.explore_rounded, size: 80, color: theme.colorScheme.primary),
               ),
-            ),
-          ),
-          Positioned(
-            bottom: -50, right: -50,
-            child: Container(
-              width: 250, height: 250,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: theme.colorScheme.secondary.withValues(alpha: 0.15),
-                boxShadow: [BoxShadow(color: theme.colorScheme.secondary.withValues(alpha: 0.3), blurRadius: 100)],
+              const SizedBox(height: 32),
+              const Text(
+                'DISHA AR',
+                style: TextStyle(fontSize: 40, fontWeight: FontWeight.w900, letterSpacing: 4),
               ),
-            ),
-          ),
-          
-          // Glassmorphic Content
-          SafeArea(
-            child: Center(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 24.0),
+              const Text(
+                'Campus Navigation Redefined',
+                style: TextStyle(color: Colors.white54, fontSize: 16, letterSpacing: 1),
+              ),
+              const Spacer(),
+              // Action Area
+              Padding(
+                padding: const EdgeInsets.all(32.0),
                 child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    // Logo/Icon
-                    Container(
-                      padding: const EdgeInsets.all(20),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.05),
-                        shape: BoxShape.circle,
-                        border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
-                      ),
-                      child: Icon(Icons.explore_rounded, size: 64, color: theme.colorScheme.primary),
-                    ),
-                    const SizedBox(height: 24),
-                    Text(
-                      'Disha AR',
-                      style: theme.textTheme.headlineMedium?.copyWith(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 1.2,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Sardar Patel Institute of Technology',
-                      style: theme.textTheme.titleMedium?.copyWith(color: Colors.white70),
+                    const Text(
+                      'To begin, please scan the floor anchor QR code located at the building entrance.',
                       textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 48),
-
-                    // Glowing CTA Button
-                    Container(
-                      width: double.infinity,
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(20),
-                        boxShadow: [
-                          BoxShadow(
-                            color: theme.colorScheme.primary.withValues(alpha: 0.3),
-                            blurRadius: 30,
-                            offset: const Offset(0, 10),
-                          ),
-                        ],
-                      ),
-                      child: ElevatedButton(
-                        onPressed: () {
-                          // Ensure we start fresh
-                          context.read<NavigationBloc>().add(const ScanQRCode('{"id": "reset"}', 0)); // Dummy to reset or just let it be
-                          Navigator.pushNamed(context, '/scanner');
-                        },
-                        style: ElevatedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(vertical: 24),
-                          backgroundColor: theme.colorScheme.primary,
-                          foregroundColor: const Color(0xFF0F172A),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                          elevation: 0,
-                        ),
-                        child: const Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.qr_code_scanner_rounded, size: 28),
-                            SizedBox(width: 12),
-                            Text(
-                              'Scan to Start',
-                              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, letterSpacing: 0.5),
-                            ),
-                          ],
-                        ),
-                      ),
+                      style: TextStyle(color: Colors.white70),
                     ),
                     const SizedBox(height: 32),
-                    
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.05),
-                        borderRadius: BorderRadius.circular(30),
-                        border: Border.all(color: Colors.white10),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.info_outline_rounded, size: 16, color: theme.colorScheme.primary),
-                          const SizedBox(width: 8),
-                          const Text(
-                            'Scan any anchor QR code to begin',
-                            style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.w500),
-                          ),
-                        ],
+                    SizedBox(
+                      width: double.infinity,
+                      height: 64,
+                      child: ElevatedButton(
+                        onPressed: () => Navigator.pushNamed(context, '/scanner'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: theme.colorScheme.primary,
+                          foregroundColor: Colors.black,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                        ),
+                        child: const Text('SCAN & START', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                       ),
                     ),
                   ],
                 ),
               ),
-            ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
