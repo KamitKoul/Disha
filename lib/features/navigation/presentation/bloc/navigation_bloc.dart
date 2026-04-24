@@ -243,8 +243,14 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
     double distanceSinceLastLegit = currentPos.distanceTo(_lastLegitPosition!);
     bool isActuallyMoving = distanceSinceLastLegit > 0.15;
 
+    // VELOCITY FILTER: Ignore teleportation jumps > 1.5m per update (sensor drift)
+    // 1.5m in 100ms is 15m/s, which is impossible for indoor walking.
+    if (distanceSinceLastLegit > 1.5) {
+       _lastLegitPosition = currentPos.clone(); // Resync without adding to distance
+       return;
+    }
+
     if (!isActuallyMoving && state.currentPosition != null) {
-       // Still emit position for the AR view, but don't update navigation/stats
        emit(state.copyWith(currentPosition: currentPos));
        return;
     }

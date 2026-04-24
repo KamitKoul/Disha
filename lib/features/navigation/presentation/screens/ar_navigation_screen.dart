@@ -25,8 +25,6 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
   String? _lastSpokenInstruction;
   int _lastSpokenTime = 0;
   int _lastUpdateTime = 0;
-  
-  // UX Optimizations
   bool _isCalibrated = false;
 
   @override
@@ -39,7 +37,6 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
         ArService().setOnCameraUpdate((position) {
           if (mounted) {
             final now = DateTime.now().millisecondsSinceEpoch;
-            // Lower update frequency (10Hz) for UI stability and battery
             if (now - _lastUpdateTime > 100) {
               _lastUpdateTime = now;
               context.read<NavigationBloc>().add(UpdateCurrentPosition(position));
@@ -63,70 +60,83 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
     
     return Scaffold(
       backgroundColor: const Color(0xFF0F172A),
-      body: BlocConsumer<NavigationBloc, NavigationState>(
-        listener: (context, state) {
-          if (state.currentNodeId != null && !_isCalibrated) {
-            setState(() => _isCalibrated = true);
-          }
-
-          if (state.nextInstruction != null && state.nextInstruction != _lastSpokenInstruction) {
-             final now = DateTime.now().millisecondsSinceEpoch;
-             if (now - _lastSpokenTime > 4000) {
-                _lastSpokenInstruction = state.nextInstruction;
-                _lastSpokenTime = now;
-                if (!state.isMuted) TtsService().speak(state.nextInstruction!);
-             }
-          }
-        },
-        builder: (context, state) {
-          return Stack(
-            fit: StackFit.expand,
-            children: [
-              // AR VIEW
-              if (_showAr) const ArViewWidget(),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          // FIXED AR LAYER: Move outside BlocConsumer to stop jitter
+          if (_showAr) const ArViewWidget(),
+          
+          // UI OVERLAY LAYER
+          BlocConsumer<NavigationBloc, NavigationState>(
+            listenWhen: (prev, curr) => prev.status != curr.status || prev.currentNodeId != curr.currentNodeId || prev.nextInstruction != curr.nextInstruction,
+            listener: (context, state) {
+              if (state.currentNodeId != null && !_isCalibrated) {
+                setState(() => _isCalibrated = true);
+              }
+              if (state.nextInstruction != null && state.nextInstruction != _lastSpokenInstruction) {
+                 final now = DateTime.now().millisecondsSinceEpoch;
+                 if (now - _lastSpokenTime > 4000) {
+                    _lastSpokenInstruction = state.nextInstruction;
+                    _lastSpokenTime = now;
+                    if (!state.isMuted) TtsService().speak(state.nextInstruction!);
+                 }
+              }
               
-              // BLURRED OVERLAY IF NOT CALIBRATED
-              if (!_isCalibrated)
-                _buildCalibrationOverlay(context, theme),
+              // Native path rendering listeners
+              if (state.status == NavigationStatus.navigating) {
+                ArService().renderPath(state.route);
+              }
+              if (state.status == NavigationStatus.mapping) {
+                ArService().renderBreadcrumbs(state.mappingPath);
+              }
+            },
+            buildWhen: (prev, curr) => 
+                prev.status != curr.status || 
+                prev.mappingPath.length != curr.mappingPath.length ||
+                prev.stepsCount != curr.stepsCount ||
+                prev.currentWaypointIndex != curr.currentWaypointIndex ||
+                prev.currentNodeId != curr.currentNodeId,
+            builder: (context, state) {
+              return Stack(
+                fit: StackFit.expand,
+                children: [
+                  if (!_isCalibrated) _buildCalibrationOverlay(context, theme),
 
-              // TOP DASHBOARD (Only show if calibrated)
-              if (_isCalibrated)
-                Positioned(
-                  top: MediaQuery.of(context).padding.top + 12,
-                  left: 16,
-                  right: 16,
-                  child: _buildNavigationCard(context, state, theme),
-                ),
+                  if (_isCalibrated)
+                    Positioned(
+                      top: MediaQuery.of(context).padding.top + 12,
+                      left: 16,
+                      right: 16,
+                      child: _buildNavigationCard(context, state, theme),
+                    ),
 
-              // MAPPING HUD
-              if (state.status == NavigationStatus.mapping)
-                Positioned(
-                  top: MediaQuery.of(context).padding.top + 12,
-                  left: 16,
-                  right: 16,
-                  child: _buildMappingCard(context, state, theme),
-                ),
-              
-              // MINI MAP
-              if (_isCalibrated && state.status != NavigationStatus.mapping)
-                const Positioned(bottom: 32, right: 16, child: MinimapWidget()),
+                  if (state.status == NavigationStatus.mapping)
+                    Positioned(
+                      top: MediaQuery.of(context).padding.top + 12,
+                      left: 16,
+                      right: 16,
+                      child: _buildMappingCard(context, state, theme),
+                    ),
+                  
+                  if (_isCalibrated && state.status != NavigationStatus.mapping)
+                    const Positioned(bottom: 32, right: 16, child: MinimapWidget()),
 
-              // ACTION BUTTONS
-              if (_isCalibrated)
-                Positioned(
-                  bottom: 32,
-                  left: 16,
-                  child: _buildActionButtons(context, state, theme),
-                ),
+                  if (_isCalibrated)
+                    Positioned(
+                      bottom: 32,
+                      left: 16,
+                      child: _buildActionButtons(context, state, theme),
+                    ),
 
-              // ARRIVAL & ARROW
-              if (state.status == NavigationStatus.arrived) 
-                _buildArrivalOverlay(context, theme)
-              else if (state.status == NavigationStatus.navigating && state.route.isNotEmpty)
-                _buildDirectionalArrow(state, theme),
-            ],
-          );
-        },
+                  if (state.status == NavigationStatus.arrived) 
+                    _buildArrivalOverlay(context, theme)
+                  else if (state.status == NavigationStatus.navigating && state.route.isNotEmpty)
+                    _buildDirectionalArrow(state, theme),
+                ],
+              );
+            },
+          ),
+        ],
       ),
     );
   }
@@ -143,7 +153,7 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
             const Text('WAITING FOR CALIBRATION', style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w900, letterSpacing: 1.5)),
             const Padding(
               padding: EdgeInsets.all(32.0),
-              child: Text('Please scan the floor QR code to initialize the navigation system.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white70)),
+              child: Text('Scan the QR code to start.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white70)),
             ),
             const CircularProgressIndicator(color: Colors.blueAccent),
           ],
@@ -186,22 +196,28 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
   }
 
   Widget _buildDirectionalArrow(NavigationState state, ThemeData theme) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const SizedBox(height: 120),
-          Transform.rotate(
-            angle: _calculateArrowAngle(state),
-            child: Icon(Icons.navigation_rounded, size: 100, color: theme.colorScheme.primary.withValues(alpha: 0.8)),
+    // Arrow needs high-frequency updates, so we use a separate BlocBuilder for just the rotation
+    return BlocBuilder<NavigationBloc, NavigationState>(
+      buildWhen: (prev, curr) => prev.currentPosition != curr.currentPosition || prev.currentWaypointIndex != curr.currentWaypointIndex,
+      builder: (context, state) {
+        return Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 120),
+              Transform.rotate(
+                angle: _calculateArrowAngle(state),
+                child: Icon(Icons.navigation_rounded, size: 100, color: theme.colorScheme.primary.withValues(alpha: 0.8)),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                decoration: BoxDecoration(color: Colors.black45, borderRadius: BorderRadius.circular(8)),
+                child: const Text('FOLLOW ARROW', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 12, letterSpacing: 1)),
+              ),
+            ],
           ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-            decoration: BoxDecoration(color: Colors.black45, borderRadius: BorderRadius.circular(8)),
-            child: const Text('FOLLOW ARROW', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 12, letterSpacing: 1)),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -209,8 +225,6 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
     if (state.route.isEmpty || state.currentPosition == null || state.currentWaypointIndex >= state.route.length) return 0.0;
     final target = state.route[state.currentWaypointIndex];
     final current = state.currentPosition!;
-    
-    // ACCURATE AR MATH: atan2(dx, -dz) because -Z is forward in AR systems
     double dx = target.x - current.x;
     double dz = target.z - current.z;
     return math.atan2(dx, -dz);
@@ -284,8 +298,6 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
                 _buildSmallStat('Steps', '${state.stepsCount}', Colors.greenAccent),
               ],
             ),
-            const SizedBox(height: 12),
-            const Text('Walk and mark every corner for high accuracy', style: TextStyle(color: Colors.white54, fontSize: 11)),
           ],
         ),
       ),
@@ -305,7 +317,8 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
     final TextEditingController nameController = TextEditingController();
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
+      barrierDismissible: false, // Prevent accidental dismissal
+      builder: (dialogContext) => AlertDialog(
         backgroundColor: const Color(0xFF1E293B),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: const Text('Name this Location', style: TextStyle(color: Colors.white)),
@@ -322,13 +335,13 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('CANCEL', style: TextStyle(color: Colors.white38))),
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('CANCEL', style: TextStyle(color: Colors.white38))),
           ElevatedButton(
             onPressed: () {
               if (nameController.text.isNotEmpty) {
                 setState(() { _isMapping = true; _mappingLabel = nameController.text; });
                 context.read<NavigationBloc>().add(const StartMapping());
-                Navigator.pop(context);
+                Navigator.pop(dialogContext);
               }
             },
             style: ElevatedButton.styleFrom(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
