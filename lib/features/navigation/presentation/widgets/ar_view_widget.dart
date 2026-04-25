@@ -9,7 +9,7 @@ class ArViewWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // This is used in the platform side to register the view.
-    const String viewType = 'com.koul.disha/ar_view';
+    const String viewType = 'com.hyumn.disha/ar_view';
     // Pass parameters to the platform side.
     final Map<String, dynamic> creationParams = <String, dynamic>{
       'enableOcclusion': enableOcclusion,

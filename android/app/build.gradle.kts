@@ -7,8 +7,8 @@ plugins {
 
 android {
     namespace = "com.hyumn.disha"
-    compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    compileSdk = 36
+    ndkVersion = "27.0.12077973"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -26,7 +26,7 @@ android {
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = 24
-        targetSdk = flutter.targetSdkVersion
+        targetSdk = 35 // Updated for Android 15 (16KB Page Size support)
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
@@ -38,11 +38,17 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
 }
 
 dependencies {
     implementation("com.google.ar:core:1.42.0")
-    // Reverted to 0.10.0 for View-based PlatformView stability
+    // Reverted to 0.10.0 for immediate stability and 16KB compatibility via AGP/NDK
     implementation("io.github.sceneview:arsceneview:0.10.0")
 }
 

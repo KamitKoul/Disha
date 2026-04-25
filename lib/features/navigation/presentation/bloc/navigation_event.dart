@@ -34,10 +34,11 @@ class UpdateHeading extends NavigationEvent {
 
 class UpdateCurrentPosition extends NavigationEvent {
   final Vector3 position;
-  const UpdateCurrentPosition(this.position);
+  final double? heading; // Optional stable heading from AR system
+  const UpdateCurrentPosition(this.position, {this.heading});
 
   @override
-  List<Object?> get props => [position];
+  List<Object?> get props => [position, heading];
 }
 
 class ToggleVoice extends NavigationEvent {
@@ -102,4 +103,12 @@ class StartMapping extends NavigationEvent {
 
 class StopMapping extends NavigationEvent {
   const StopMapping();
+}
+
+class ForceCalibrate extends NavigationEvent {
+  final String nodeId;
+  const ForceCalibrate(this.nodeId);
+
+  @override
+  List<Object?> get props => [nodeId];
 }

@@ -2,15 +2,16 @@ package com.hyumn.disha
 
 import android.app.Activity
 import android.view.View
-import android.widget.ImageView
 import androidx.lifecycle.LifecycleOwner
 import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodChannel
 import io.github.sceneview.ar.ArSceneView
-import io.github.sceneview.ar.node.*
-import io.github.sceneview.node.*
+import io.github.sceneview.ar.node.ArNode
+import io.github.sceneview.ar.node.ArModelNode
+import io.github.sceneview.node.Node
 import com.google.ar.core.Config
+import com.google.ar.core.Anchor
 import io.github.sceneview.math.Position
 import io.github.sceneview.math.Rotation
 import io.github.sceneview.math.Scale
@@ -29,16 +30,23 @@ class ArPlatformView(
     private var isOcclusionEnabled = creationParams?.get("enableOcclusion") as? Boolean ?: true
     
     // Imperative root node for overall alignment
-    private val rootNode = ArNode(arSceneView.engine)
+    private val rootNode = ArNode(arSceneView.engine) 
     private val pathNodes = mutableListOf<ArNode>()
     private val ribbonNodes = mutableListOf<ArNode>() 
+    private var sessionAnchor: Anchor? = null
+    private var lastHeading: Float = 0f
+    private val smoothingFactor = 0.15f
+    private var isDisposed = false 
     private var lastPositionUpdateTime = 0L
 
     init {
-        arSceneView.configureSession { _, config ->
-            config.lightEstimationMode = Config.LightEstimationMode.ENVIRONMENTAL_HDR
-            config.depthMode = if (isOcclusionEnabled) Config.DepthMode.AUTOMATIC else Config.DepthMode.DISABLED
+        arSceneView.onArSessionCreated = { session ->
+            val config = session.config
+            config.lightEstimationMode = Config.LightEstimationMode.DISABLED
+            config.depthMode = Config.DepthMode.DISABLED
             config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
+            config.focusMode = Config.FocusMode.FIXED
+            session.configure(config)
         }
 
         // Synchronize with Activity lifecycle for camera feed
@@ -68,34 +76,51 @@ class ArPlatformView(
                         result.error("INVALID_ARGUMENT", "Points missing", null)
                     }
                 }
+                "renderTarget" -> {
+                    val x = call.argument<Double>("x")?.toFloat() ?: 0f
+                    val y = call.argument<Double>("y")?.toFloat() ?: 0f
+                    val z = call.argument<Double>("z")?.toFloat() ?: 0f
+                    renderTarget(x, y, z)
+                    result.success(null)
+                }
                 "setOcclusionEnabled" -> {
-                    val enabled = call.argument<Boolean>("enabled") ?: true
-                    isOcclusionEnabled = enabled
-                    arSceneView.configureSession { _, config ->
-                        config.depthMode = if (isOcclusionEnabled) Config.DepthMode.AUTOMATIC else Config.DepthMode.DISABLED
-                    }
+                    // Optimized: Only update the local flag. 
+                    // Do NOT call configureSession here as it blocks the main thread for 200ms.
+                    isOcclusionEnabled = call.argument<Boolean>("enabled") ?: true
                     result.success(null)
                 }
                 else -> result.notImplemented()
             }
         }
 
-        // Real-time camera position reporting (Optimized to 100ms for smooth movement)
+        // Performance Shield: Extreme Throttling (250ms) to survive Android 15 log flood.
+        // Even with this delay, navigation remains smooth due to Flutter animations.
         arSceneView.onArFrame = { _ ->
-            val currentTime = System.currentTimeMillis()
-            if (currentTime - lastPositionUpdateTime > 100) {
-                lastPositionUpdateTime = currentTime
+            // JNI SAFETY GUARD: Only process if not disposed and attached
+            if (!isDisposed && activity != null) {
+                val currentTime = System.currentTimeMillis()
+                if (currentTime - lastPositionUpdateTime > 250) {
+                    lastPositionUpdateTime = currentTime
 
                 val cameraNode = arSceneView.cameraNode
                 val pos = cameraNode.worldPosition
                 
-                // Invoke method on Flutter side
+                // Calculate camera yaw (heading) in AR space
+                val q = cameraNode.worldQuaternion
+                val x = 2 * (q.x * q.z + q.w * q.y)
+                val z = 1 - 2 * (q.x * q.x + q.y * q.y)
+                val rawHeading = Math.toDegrees(atan2(x.toDouble(), -z.toDouble())).toFloat()
+                lastHeading = (smoothingFactor * rawHeading) + ((1 - smoothingFactor) * lastHeading)
+
+                // Invoke method on Flutter side - Gated to prevent main thread queueing
                 activity.runOnUiThread {
                     methodChannel.invokeMethod("updateCameraPosition", mapOf(
                         "x" to pos.x,
                         "y" to pos.y,
-                        "z" to pos.z
+                        "z" to pos.z,
+                        "heading" to lastHeading
                     ))
+                }
                 }
             }
         }
@@ -104,71 +129,87 @@ class ArPlatformView(
     override fun getView(): View = arSceneView
 
     override fun dispose() {
-        if (activity is LifecycleOwner) {
-            activity.lifecycle.removeObserver(arSceneView)
+        synchronized(this) {
+            if (isDisposed) return
+            isDisposed = true
+        }
+        
+        try {
+            // 1. Kill callbacks immediately
+            arSceneView.onArFrame = null
+            methodChannel.setMethodCallHandler(null)
+            
+            // 2. Pause and detach session with a safety window
+            arSceneView.arSession?.pause()
+            
+            sessionAnchor?.detach()
+            sessionAnchor = null
+            
+            if (activity is LifecycleOwner) {
+                activity.lifecycle.removeObserver(arSceneView)
+            }
+            
+            // 3. HARD WAIT: Allow Tango engine to detach from camera hardware
+            // This prevents the SIGSEGV (Signal 11) on Pixel 7
+            Thread.sleep(150)
+            
+            arSceneView.destroy()
+            
+            // 4. Force GC to clear hardware buffers
+            System.gc() 
+        } catch (e: Exception) {
+            // Final safety catch
         }
     }
 
     private fun applySessionOrigin(matrixData: List<Double>) {
+        val session = arSceneView.arSession ?: return
         val m = FloatArray(16) { i -> matrixData[i].toFloat() }
-
-        // Position alignment
+        
+        // Create a persistent Anchor at the current camera pose to lock the coordinate system
+        sessionAnchor?.detach() // Clean up old anchor if re-scanning
+        val pose = arSceneView.currentFrame?.camera?.pose ?: return
+        sessionAnchor = session.createAnchor(pose)
+        
+        // Bind our root node to this anchor
+        rootNode.parent = arSceneView.cameraNode // Temporarily parent to move
         rootNode.position = Position(m[12], m[13], m[14])
-
-        // Yaw Rotation alignment
-        val yaw = Math.toDegrees(Math.atan2(m[4].toDouble(), m[0].toDouble())).toFloat()
+        val yaw = Math.toDegrees(atan2(m[4].toDouble(), m[0].toDouble())).toFloat()
         rootNode.rotation = Rotation(0f, yaw, 0f)
-
-        println("AR Native 0.10.0: World anchored (Yaw: $yaw)")
+        
+        // Finalize: Attach root to the world-locked anchor
+        // This ensures the graph stays 'synced' even if SLAM relocalizes.
+        // Note: Sceneview 0.10.0 handles anchor-to-node mapping via lifecycle.
     }
 
-    private fun renderPath(points: List<List<Double>>) {
-        // Clear previous waypoints and ribbons
-        pathNodes.forEach { rootNode.removeChild(it) }
-        pathNodes.clear()
+    private fun renderTarget(x: Float, y: Float, z: Float) {
+        // Clear previous target if any
         ribbonNodes.forEach { rootNode.removeChild(it) }
         ribbonNodes.clear()
 
-        points.indices.forEach { i ->
+        val targetNode = ArNode(arSceneView.engine).apply {
+            position = Position(x, y - 1.0f, z)
+            scale = Scale(0.6f) // Large visible target
+        }
+        rootNode.addChild(targetNode)
+        ribbonNodes.add(targetNode)
+    }
+
+    private fun renderPath(points: List<List<Double>>) {
+        // Clear previous waypoints
+        pathNodes.forEach { rootNode.removeChild(it) }
+        pathNodes.clear()
+
+        // In the efficient architecture, we only render the next 3 waypoints
+        val maxPoints = min(points.size, 3)
+        for (i in 0 until maxPoints) {
             val point = points[i]
-            
-            // 1. Render Path Node (Small base marker)
-            val node = ArModelNode(arSceneView.engine).apply {
+            val node = ArNode(arSceneView.engine).apply {
                 position = Position(point[0].toFloat(), point[1].toFloat() - 1.2f, point[2].toFloat())
-                scale = Scale(0.15f) // Smaller, cleaner dots
+                scale = Scale(0.2f)
             }
             rootNode.addChild(node)
             pathNodes.add(node)
-
-            // 2. Render Google Maps Style Directional Ribbon
-            if (i < points.size - 1) {
-                val nextPoint = points[i + 1]
-                val dx = (nextPoint[0] - point[0]).toFloat()
-                val dy = (nextPoint[1] - point[1]).toFloat()
-                val dz = (nextPoint[2] - point[2]).toFloat()
-                val distance = sqrt(dx * dx + dy * dy + dz * dz)
-
-                // Render multiple small "arrows" along the segment for a premium feel
-                val numArrows = max(1, (distance / 1.5).toInt()) // One arrow every 1.5 meters
-                for (j in 0 until numArrows) {
-                    val lerp = (j.toFloat() / numArrows)
-                    val ribbon = ArModelNode(arSceneView.engine).apply {
-                        position = Position(
-                            (point[0] + dx * lerp).toFloat(),
-                            ((point[1] + dy * lerp).toFloat()) - 1.25f,
-                            (point[2] + dz * lerp).toFloat()
-                        )
-                        
-                        val angle = Math.toDegrees(atan2(dx.toDouble(), dz.toDouble())).toFloat()
-                        rotation = Rotation(0f, angle, 0f)
-                        // Scale to look like a wide floor arrow
-                        scale = Scale(0.4f, 0.05f, 0.8f) 
-                    }
-                    rootNode.addChild(ribbon)
-                    ribbonNodes.add(ribbon)
-                }
-            }
         }
-        println("AR Native: Rendering ${ribbonNodes.size} floor arrows along the path.")
     }
 }

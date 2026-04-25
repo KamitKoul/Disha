@@ -11,6 +11,7 @@ import '../../domain/a_star_router.dart';
 import '../../../../core/utils/gps_converter.dart';
 import '../../../../core/services/map_service.dart';
 import '../../../../core/utils/spatial_hash.dart';
+import '../../../../core/services/ar_service.dart';
 
 part 'navigation_event.dart';
 part 'navigation_state.dart';
@@ -23,6 +24,10 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
   double _stepBuffer = 0.0; // Cumulative distance waiting to become a 'step'
   DateTime _lastMovementTime = DateTime.now();
   StreamSubscription<CompassEvent>? _compassSubscription;
+  
+  // Smoothing for Heading
+  final List<double> _headingBuffer = [];
+  static const int _headingBufferSize = 10;
 
   NavigationBloc({required this.graph}) : super(const NavigationState()) {
     _loadCustomNodes();
@@ -40,6 +45,7 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
     on<UpdateHeading>(_onUpdateHeading);
     on<AddWaypoint>(_onAddWaypoint);
     on<ManualNextWaypoint>(_onManualNextWaypoint);
+    on<ForceCalibrate>(_onForceCalibrate);
 
     _compassSubscription = FlutterCompass.events?.listen((event) {
       if (event.heading != null) {
@@ -52,6 +58,31 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
   Future<void> close() {
     _compassSubscription?.cancel();
     return super.close();
+  }
+
+  void _onForceCalibrate(ForceCalibrate event, Emitter<NavigationState> emit) {
+    if (graph.containsKey(event.nodeId)) {
+      HapticFeedback.heavyImpact();
+      _lastLegitPosition = null;
+      _stepBuffer = 0.0;
+      
+      // Use current heading for localization
+      final double heading = state.currentHeading;
+      GpsConverter.convertGraphToLocalCoordinates(graph, event.nodeId, heading);
+      _rebuildSpatialHash();
+
+      emit(state.copyWith(
+        status: state.destinationId != null ? NavigationStatus.calculating : NavigationStatus.idle,
+        currentNodeId: event.nodeId,
+        stepsCount: 0,
+        currentDistanceWalked: 0.0,
+        lastActionFeedback: "Emergency calibration at ${graph[event.nodeId]?.label}",
+      ));
+
+      if (state.destinationId != null) {
+        _calculateAndEmitRoute(event.nodeId, state.destinationId!, emit);
+      }
+    }
   }
 
   void _onManualNextWaypoint(ManualNextWaypoint event, Emitter<NavigationState> emit) {
@@ -89,7 +120,14 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
   }
 
   void _onUpdateHeading(UpdateHeading event, Emitter<NavigationState> emit) {
-    emit(state.copyWith(currentHeading: event.heading));
+    // Moving average for heading to prevent jittery instructions
+    _headingBuffer.add(event.heading);
+    if (_headingBuffer.length > _headingBufferSize) {
+      _headingBuffer.removeAt(0);
+    }
+    
+    final double smoothHeading = _headingBuffer.reduce((a, b) => a + b) / _headingBuffer.length;
+    emit(state.copyWith(currentHeading: smoothHeading));
   }
 
   Future<void> _onDeleteLocation(DeleteLocation event, Emitter<NavigationState> emit) async {
@@ -217,7 +255,20 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
     }
   }
 
-  void _onScanQRCode(ScanQRCode event, Emitter<NavigationState> emit) {
+  void _onScanQRCode(ScanQRCode event, Emitter<NavigationState> emit) async {
+    // HARD RESET: Ensure all previous navigation/mapping state is cleared before new scan
+    emit(state.copyWith(
+      status: NavigationStatus.idle,
+      currentNodeId: null,
+      route: [],
+      mappingPath: [],
+      currentWaypointIndex: 0,
+      stepsCount: 0,
+      currentDistanceWalked: 0,
+      currentDistance: 0,
+      lastActionFeedback: 'Resyncing AR Engine...',
+    ));
+    
     try {
       final payload = jsonDecode(event.payload);
       final nodeId = payload['id'] as String;
@@ -236,7 +287,9 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
       _rebuildSpatialHash();
       _lastLegitPosition = null;
       _stepBuffer = 0.0;
+      ArService().setSessionOrigin(Matrix4.identity());
 
+      HapticFeedback.heavyImpact(); // Physical confirmation of lock-on
       emit(state.copyWith(
         status: state.destinationId != null ? NavigationStatus.calculating : NavigationStatus.idle,
         currentNodeId: nodeId,
@@ -244,6 +297,7 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
         currentDistanceWalked: 0.0,
         currentH3Cell: graph[nodeId]?.h3Cell,
         currentHeading: event.heading,
+        currentWaypointIndex: 0,
         lastActionFeedback: "Localized at ${graph[nodeId]?.label}",
       ));
       if (state.destinationId != null) {
@@ -266,6 +320,11 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
 
   void _onUpdateCurrentPosition(UpdateCurrentPosition event, Emitter<NavigationState> emit) {
     final rawPos = event.position;
+    
+    // If the event provides a stable AR-tracked heading, update our internal state
+    if (event.heading != null) {
+      emit(state.copyWith(currentHeading: event.heading));
+    }
     
     if (_lastLegitPosition == null) {
       _lastLegitPosition = rawPos.clone();
@@ -327,12 +386,11 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
 
       if (state.route.isEmpty) return;
 
-      // TURN-BY-TURN LOGIC
       final currentIdx = state.currentWaypointIndex;
       final target = state.route[currentIdx];
       final distanceToTarget = rawPos.distanceTo(target);
 
-      if (distanceToTarget < 1.5) { 
+      if (distanceToTarget < 1.5) { // Threshold for waypoint switch
         final nextIdx = currentIdx + 1;
         if (nextIdx >= state.route.length) {
           HapticFeedback.heavyImpact();
@@ -367,8 +425,20 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
         ));
       }
     } else {
-      // NOT ENOUGH FOR A STEP: Just update camera position but don't move the numbers
-      emit(state.copyWith(currentPosition: rawPos));
+      // NOT ENOUGH FOR A STEP (UI-only update)
+      // We still update the 'currentDistance' to the target so the HUD feels responsive
+      // even if the step counter hasn't ticked yet.
+      if (state.status == NavigationStatus.navigating && state.route.isNotEmpty) {
+        final target = state.route[state.currentWaypointIndex];
+        final distanceToTarget = rawPos.distanceTo(target);
+        emit(state.copyWith(
+          currentPosition: rawPos,
+          currentDistance: distanceToTarget,
+          nextInstruction: _getInstruction(rawPos, target),
+        ));
+      } else {
+        emit(state.copyWith(currentPosition: rawPos));
+      }
     }
   }
 
@@ -394,8 +464,29 @@ class NavigationBloc extends Bloc<NavigationEvent, NavigationState> {
   String _getInstruction(Vector3 current, Vector3 target) {
     final distance = current.distanceTo(target);
     final int displayDist = distance.round();
+    
     if (displayDist < 2) return "Arriving...";
-    return "Walk straight for $displayDist meters";
+
+    // Calculate relative bearing to target
+    // ARCore Forward is -Z, so we use (current.z - target.z)
+    final double dx = target.x - current.x;
+    final double dz = current.z - target.z;
+    final double bearingRad = math_dart.atan2(dx, dz);
+    final double headingRad = state.currentHeading * (math_dart.pi / 180.0);
+    
+    double relativeBearing = bearingRad - headingRad;
+    while (relativeBearing > math_dart.pi) { relativeBearing -= 2 * math_dart.pi; }
+    while (relativeBearing < -math_dart.pi) { relativeBearing += 2 * math_dart.pi; }
+
+    final double relDeg = relativeBearing * (180.0 / math_dart.pi);
+
+    if (relDeg.abs() < 20) return "Walk straight for $displayDist meters";
+    if (relDeg >= 20 && relDeg < 60) return "Bear right for $displayDist meters";
+    if (relDeg <= -20 && relDeg > -60) return "Bear left for $displayDist meters";
+    if (relDeg >= 60 && relDeg < 120) return "Turn right and walk $displayDist meters";
+    if (relDeg <= -60 && relDeg > -120) return "Turn left and walk $displayDist meters";
+    
+    return "Turn around and walk $displayDist meters";
   }
 
   void _calculateAndEmitRoute(String startId, String endId, Emitter<NavigationState> emit) async {

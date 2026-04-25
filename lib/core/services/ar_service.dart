@@ -1,7 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:vector_math/vector_math_64.dart';
-import '../utils/path_simplifier.dart';
 
 class ArService {
   static const MethodChannel _channel = MethodChannel('com.hyumn.disha/ar_navigation');
@@ -10,7 +9,7 @@ class ArService {
   static final ArService _instance = ArService._internal();
   factory ArService() => _instance;
   
-  Function(Vector3)? _onCameraUpdate;
+  Function(Vector3, double)? _onCameraUpdate;
   
   ArService._internal() {
     _channel.setMethodCallHandler((call) async {
@@ -21,12 +20,13 @@ class ArService {
           args['y'].toDouble(),
           args['z'].toDouble(),
         );
-        _onCameraUpdate?.call(position);
+        final double heading = args['heading']?.toDouble() ?? 0.0;
+        _onCameraUpdate?.call(position, heading);
       }
     });
   }
 
-  void setOnCameraUpdate(Function(Vector3) callback) {
+  void setOnCameraUpdate(Function(Vector3, double) callback) {
     _onCameraUpdate = callback;
   }
 
@@ -35,13 +35,20 @@ class ArService {
   }
 
   Future<void> setSessionOrigin(Matrix4 transform) async {
-    try {
-      // Small delay to ensure native view is ready
-      await Future.delayed(const Duration(milliseconds: 500));
-      final List<double> matrixList = transform.storage.toList();
-      await _channel.invokeMethod('setSessionOrigin', {'matrix': matrixList});
-    } on PlatformException catch (e) {
-      debugPrint("Failed to set session origin: '${e.message}'.");
+    final List<double> matrixList = transform.storage.toList();
+    
+    // Retry logic to handle hardware warmup delay
+    for (int i = 0; i < 3; i++) {
+      try {
+        await _channel.invokeMethod('setSessionOrigin', {'matrix': matrixList});
+        return; // Success!
+      } on MissingPluginException {
+        // Native view not ready yet, wait and retry
+        await Future.delayed(Duration(milliseconds: 500 * (i + 1)));
+      } catch (e) {
+        debugPrint("AR Sync Error: $e");
+        return;
+      }
     }
   }
 
@@ -57,20 +64,32 @@ class ArService {
     if (points.isEmpty) return;
     
     try {
-      // Optimization: Simplify the path before sending to native AR engine
-      // Low epsilon (0.05m) preserves turn detail while removing redundant straight-line points
-      final simplifiedPoints = PathSimplifier.simplify(points, epsilon: 0.05);
-      
-      final List<List<double>> pointsList = simplifiedPoints.map((v) => [v.x, v.y, v.z]).toList();
+      // For the new efficient architecture, we simplify the path to just the next turn points
+      // This reduces native rendering load significantly.
+      final List<List<double>> pointsList = points.map((v) => [v.x, v.y, v.z]).toList();
       await _channel.invokeMethod('renderPath', {
         'points': pointsList,
-        'color': color, // Customizable color (defaults to Google Blue)
-        'thickness': 0.18,  // Slightly thicker for better visibility
-        'pulsing': true,    // Dynamic pulsing effect
-        'dashed': false,
+        'color': color,
+        'thickness': 0.15,
+        'pulsing': true,
       });
     } on PlatformException catch (e) {
       debugPrint("Failed to render path: '${e.message}'.");
+    }
+  }
+
+  /// Renders a single high-visibility target marker at the specified point.
+  /// Used for the "Vector HUD" architecture to show the immediate next destination.
+  Future<void> renderTarget(Vector3 point, {String color = '#EA4335'}) async {
+    try {
+      await _channel.invokeMethod('renderTarget', {
+        'x': point.x,
+        'y': point.y,
+        'z': point.z,
+        'color': color,
+      });
+    } on PlatformException catch (e) {
+      debugPrint("Failed to render target: '${e.message}'.");
     }
   }
 

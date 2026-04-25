@@ -1,11 +1,9 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:vector_math/vector_math_64.dart' hide Colors;
 import '../bloc/navigation_bloc.dart';
 import '../widgets/ar_view_widget.dart';
 import '../widgets/minimap_widget.dart';
-import '../widgets/trip_stats_row.dart';
 import '../../../../core/services/ar_service.dart';
 import '../../../../core/services/tts_service.dart';
 import 'dart:math' as math;
@@ -37,15 +35,17 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
       _isCalibrated = true;
     }
 
-    _initTimer = Timer(const Duration(milliseconds: 1500), () {
+    // Increased delay to 2500ms to ensure the QR scanner has fully released 
+    // the camera hardware before AR session tries to claim it.
+    _initTimer = Timer(const Duration(milliseconds: 2500), () {
       if (mounted) {
         setState(() => _showAr = true);
-        ArService().setOnCameraUpdate((position) {
+        ArService().setOnCameraUpdate((position, heading) {
           if (mounted) {
             final now = DateTime.now().millisecondsSinceEpoch;
             if (now - _lastUpdateTime > 100) {
               _lastUpdateTime = now;
-              context.read<NavigationBloc>().add(UpdateCurrentPosition(position));
+              context.read<NavigationBloc>().add(UpdateCurrentPosition(position, heading: heading));
             }
           }
         });
@@ -81,6 +81,12 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
             listener: (context, state) {
               if (state.currentNodeId != null && !_isCalibrated) {
                 setState(() => _isCalibrated = true);
+                
+                // SYNC-LOCK: Immediately push path to native side upon calibration
+                if (state.status == NavigationStatus.navigating && state.route.isNotEmpty) {
+                  ArService().renderPath(state.route.take(5).toList());
+                  ArService().renderTarget(state.route.last);
+                }
               }
 
               // SHOW FEEDBACK SNACKBAR
@@ -97,16 +103,34 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
               }
 
               if (state.nextInstruction != null && state.nextInstruction != _lastSpokenInstruction) {
-                 final now = DateTime.now().millisecondsSinceEpoch;
-                 if (now - _lastSpokenTime > 4000) {
-                    _lastSpokenInstruction = state.nextInstruction;
-                    _lastSpokenTime = now;
-                    if (!state.isMuted) TtsService().speak(state.nextInstruction!);
-                 }
+                  final now = DateTime.now().millisecondsSinceEpoch;
+                  if (now - _lastSpokenTime > 4000) {
+                     _lastSpokenInstruction = state.nextInstruction;
+                     _lastSpokenTime = now;
+                     
+                     // VOICE MIRROR: Show what the voice says as a snackbar
+                     ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                     ScaffoldMessenger.of(context).showSnackBar(
+                       SnackBar(
+                         content: Text(state.nextInstruction!, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                         backgroundColor: const Color(0xFF1E293B).withOpacity(0.9),
+                         behavior: SnackBarBehavior.floating,
+                         duration: const Duration(seconds: 4),
+                         margin: const EdgeInsets.only(bottom: 100, left: 16, right: 16),
+                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                       ),
+                     );
+
+                     if (!state.isMuted) TtsService().speak(state.nextInstruction!);
+                  }
               }
               
               if (state.status == NavigationStatus.navigating) {
-                ArService().renderPath(state.route);
+                // SYNC-LOCK: Immediately push the route to native side
+                if (state.route.isNotEmpty) {
+                  ArService().renderPath(state.route.skip(state.currentWaypointIndex).take(5).toList());
+                  ArService().renderTarget(state.route.last);
+                }
               }
               if (state.status == NavigationStatus.mapping) {
                 ArService().renderBreadcrumbs(state.mappingPath);
@@ -133,6 +157,9 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
                       right: 16,
                       child: _buildNavigationCard(context, state, theme),
                     ),
+                  
+                  if (!_showAr && (_isCalibrated || state.currentNodeId != null))
+                    _buildLoadingOverlay(context, theme),
 
                   if (state.status == NavigationStatus.mapping)
                     Positioned(
@@ -145,11 +172,17 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
                   if ((_isCalibrated || state.currentNodeId != null) && state.status != NavigationStatus.mapping)
                     const Positioned(bottom: 32, right: 16, child: MinimapWidget()),
 
-                  if (_isCalibrated || state.currentNodeId != null)
                     Positioned(
                       bottom: 32,
                       left: 16,
                       child: _buildActionButtons(context, state, theme),
+                    ),
+
+                  if (state.status == NavigationStatus.navigating || state.status == NavigationStatus.idle)
+                    Positioned(
+                      bottom: 32,
+                      right: 16,
+                      child: _buildEmergencyCalibrateButton(context, state, theme),
                     ),
 
                   if (state.status == NavigationStatus.arrived) 
@@ -235,20 +268,55 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
     );
   }
 
+  Widget _buildEmergencyCalibrateButton(BuildContext context, NavigationState state, ThemeData theme) {
+    return FloatingActionButton(
+      heroTag: 'emergency_btn',
+      onPressed: () => _showEmergencyCalibrateDialog(context),
+      backgroundColor: Colors.redAccent.withValues(alpha: 0.8),
+      child: const Icon(Icons.emergency_rounded, color: Colors.white),
+    );
+  }
+
   Widget _buildDirectionalArrow(NavigationState state, ThemeData theme) {
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const SizedBox(height: 120),
-          Transform.rotate(
-            angle: _calculateArrowAngle(state),
-            child: Icon(Icons.navigation_rounded, size: 100, color: theme.colorScheme.primary.withValues(alpha: 0.9)),
+          const SizedBox(height: 160),
+          TweenAnimationBuilder<double>(
+            tween: Tween<double>(begin: 0, end: _calculateArrowAngle(state)),
+            duration: const Duration(milliseconds: 300),
+            builder: (context, angle, child) {
+              return Transform.rotate(
+                angle: angle,
+                child: ShaderMask(
+                  shaderCallback: (bounds) => const LinearGradient(
+                    colors: [Colors.blueAccent, Colors.cyanAccent],
+                  ).createShader(bounds),
+                  child: const Icon(Icons.navigation_rounded, size: 120, color: Colors.white),
+                ),
+              );
+            },
           ),
+          const SizedBox(height: 8),
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-            decoration: BoxDecoration(color: Colors.black45, borderRadius: BorderRadius.circular(8)),
-            child: const Text('FOLLOW ARROW', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 12, letterSpacing: 1)),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.black54,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: Colors.white24),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.ads_click_rounded, color: Colors.cyanAccent, size: 16),
+                const SizedBox(width: 8),
+                Text(
+                  '${state.currentDistance?.toStringAsFixed(1) ?? "0"}m TO NEXT TURN',
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 13, letterSpacing: 1),
+                ),
+              ],
+            ),
           ),
         ],
       ),
@@ -413,6 +481,33 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
     }
   }
 
+  void _showEmergencyCalibrateDialog(BuildContext context) {
+    final bloc = context.read<NavigationBloc>();
+    showDialog(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: const Color(0xFF1E293B),
+        title: const Text('Emergency Calibration', style: TextStyle(color: Colors.white)),
+        content: const Text(
+          'If AR is lost or QR won\'t scan, select your current location to hard-reset the system.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('CANCEL')),
+          ...bloc.graph.values.where((n) => n.category == 'Anchor').map((node) => 
+            ElevatedButton(
+              onPressed: () {
+                bloc.add(ForceCalibrate(node.id));
+                Navigator.pop(dialogContext);
+              },
+              child: Text(node.label ?? node.id),
+            )
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildArrivalOverlay(BuildContext context, ThemeData theme) {
     return Container(
       color: Colors.black.withValues(alpha: 0.9),
@@ -428,6 +523,34 @@ class _ArNavigationScreenState extends State<ArNavigationScreen> {
               onPressed: () => Navigator.pop(context), 
               style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 16), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
               child: const Text('DONE', style: TextStyle(fontWeight: FontWeight.bold)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLoadingOverlay(BuildContext context, ThemeData theme) {
+    return Container(
+      color: Colors.black87,
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(color: Colors.cyanAccent),
+            const SizedBox(height: 24),
+            Text(
+              "CALIBRATING SPATIAL MESH...",
+              style: theme.textTheme.titleSmall?.copyWith(
+                color: Colors.cyanAccent,
+                letterSpacing: 2,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              "Resetting hardware sensors for high-precision track",
+              style: theme.textTheme.bodySmall?.copyWith(color: Colors.white70),
             ),
           ],
         ),
